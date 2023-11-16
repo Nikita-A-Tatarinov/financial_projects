@@ -1,0 +1,429 @@
+---
+title: "Risk Managemen"
+authot: "Nikita Tatarinov"
+output: html_document
+date: "2023-10-26"
+---
+
+## 6.0. Data
+
+GT ID (seed): 903914813
+
+### 6.0.1. DSF
+```{r}
+library(data.table)
+dsf <- fread("./data/dsf.csv", select = c("PERMNO", "date", "RET", "vwretd"))
+dsf$RET[dsf$RET == "B" | dsf$RET == "C"] <- NA
+dsf$RET <- as.numeric(dsf$RET)
+dsf <- na.omit(dsf)
+summary(dsf)
+```
+
+### 6.0.2. Creating individual porfolio and date periods
+```{r}
+set.seed(903914813)
+first_year <- sample(1981:2000, 1, replace = FALSE) # boundaries are included
+first_date <- as.Date(paste0(first_year, "-01-01"), format = "%Y-%m-%d")
+first_year_end_date <- as.Date(paste0(first_year, "-12-31"), format = "%Y-%m-%d")
+last_date <- as.Date(paste0((first_year+9), "-12-31"), format = "%Y-%m-%d")
+
+first_year_dsf <- dsf[(dsf$date >= first_date) & (dsf$date <= first_year_end_date)]
+unique_stocks <- unique(first_year_dsf$PERMNO)
+num_unique_stocks <- length(unique_stocks)
+stock_indices <- sample(1:num_unique_stocks, 250, replace = FALSE)
+stocks <- unique_stocks[stock_indices]
+dsf <- dsf[dsf$PERMNO %in% stocks]
+
+dsf_2001_2011 <- dsf[(dsf$date >= as.Date("2001-01-01")) & (dsf$date <= as.Date("2011-12-31"))]
+dsf_2012_2022 <- dsf[(dsf$date >= as.Date("2012-01-01")) & (dsf$date <= as.Date("2022-12-31"))]
+dsf <- dsf[(dsf$date >= first_date) & (dsf$date <= last_date)]
+
+summary(dsf)
+summary(dsf_2001_2011)
+summary(dsf_2012_2022)
+```
+
+### 6.0.3. Risk-free rate
+```{r}
+library(data.table)
+rf <- fread("./data/F-F_Research_Data_Factors_daily.CSV", skip=4, select = c(1, 5))
+colnames(rf)[which(colnames(rf) == "V1")] <- "date"
+rf$date <- as.Date(as.character(rf$date), format = "%Y%m%d")
+summary(rf)
+```
+
+### 6.0.4. Merging and getting excess returns
+```{r}
+convert_returns_to_excess <- function(df) {
+  df <- merge(df, rf, by = "date")
+  df$RET <- df$RET - df$RF
+  df$vwretd <- df$vwretd - df$RF
+  colnames(df)[which(colnames(df) == "RET")] <- "EXCRET"
+  colnames(df)[which(colnames(df) == "vwretd")] <- "EXCMKT"
+  df$RF <- NULL
+  return(df)
+}
+
+dsf <- convert_returns_to_excess(dsf)
+dsf_2001_2011 <- convert_returns_to_excess(dsf_2001_2011)
+dsf_2012_2022 <- convert_returns_to_excess(dsf_2012_2022)
+
+summary(dsf)
+summary(dsf_2001_2011)
+summary(dsf_2012_2022)
+```
+
+## 6.1. Semi Beta, Downside Beta, Co-skewness and Tail Risk
+
+```{r}
+library(dplyr)
+dsf <- dsf %>% mutate(year_month = format(date, "%Y-%m"))
+dsf$year_month <- as.Date(paste0(dsf$year_month, "-01"))
+
+calculate_f <- function(df) {
+  mean_mkt = mean(dsf$EXCMKT)
+  df <- df %>% mutate(f_tk = EXCMKT - mean_mkt)
+  df <- df %>% mutate(f_tk_plus = ifelse(f_tk > 0, f_tk, 0))
+  df <- df %>% mutate(f_tk_minus = ifelse(f_tk < 0, f_tk, 0))
+  
+  num_cols <- length(unique(df$PERMNO))
+  df <- df %>% mutate(beta_denominator = f_tk * f_tk)
+  df$beta_denominator <- sum(df$beta_denominator) / num_cols
+  df <- df %>% mutate(beta_plus_denominator = f_tk_plus * f_tk_plus)
+  df$beta_plus_denominator <- sum(df$beta_plus_denominator) / num_cols
+  df <- df %>% mutate(beta_minus_denominator = f_tk_minus * f_tk_minus)
+  df$beta_minus_denominator <- sum(df$beta_minus_denominator) / num_cols
+  return(df)
+}
+dsf <- dsf %>% group_by(year_month) %>% do(calculate_f(.)) %>% ungroup()
+
+calculate_r_betas_coskew_cokurt <- function(df) {
+  mean_ret <- mean(dsf$EXCRET)
+  df <- df %>% mutate(r_tki = EXCRET - mean_ret)
+  df <- df %>% mutate(r_tki_plus = ifelse(r_tki > 0, r_tki, 0))
+  df <- df %>% mutate(r_tki_minus = ifelse(r_tki < 0, r_tki, 0))
+  
+  df <- df %>% mutate(beta_N_numenator = r_tki_minus * f_tk_minus)
+  df$beta_N_numenator <- sum(df$beta_N_numenator)
+  df <- df %>% mutate(beta_N = beta_N_numenator / beta_denominator)
+  
+  df <- df %>% mutate(beta_P_numenator = r_tki_plus * f_tk_plus)
+  df$beta_P_numenator <- sum(df$beta_P_numenator)
+  df <- df %>% mutate(beta_P = beta_P_numenator / beta_denominator)
+  
+  df <- df %>% mutate(beta_M_minus_numenator = r_tki_plus * f_tk_minus)
+  df$beta_M_minus_numenator <- sum(df$beta_M_minus_numenator)
+  df <- df %>% mutate(beta_M_minus = beta_M_minus_numenator / beta_denominator)
+  
+  df <- df %>% mutate(beta_M_plus_numenator = r_tki_minus * f_tk_plus)
+  df$beta_M_plus_numenator <- sum(df$beta_M_plus_numenator)
+  df <- df %>% mutate(beta_M_plus = beta_M_plus_numenator / beta_denominator)
+  
+  df <- df %>% mutate(beta = beta_N + beta_P - beta_M_minus - beta_M_plus)
+  
+  df <- df %>% mutate(beta_minus_numenator = r_tki * f_tk_minus)
+  df$beta_minus_numenator <- sum(df$beta_minus_numenator)
+  df <- df %>% mutate(beta_minus = beta_minus_numenator / beta_minus_denominator)
+  
+  df <- df %>% mutate(beta_plus_numenator = r_tki * f_tk_plus)
+  df$beta_plus_numenator <- sum(df$beta_plus_numenator)
+  df <- df %>% mutate(beta_plus = beta_plus_numenator / beta_plus_denominator)
+  
+  m <- length(df$EXCRET)
+  
+  df <- df %>% mutate(coskew_numenator = r_tki * f_tk * f_tk)
+  df$coskew_numenator <- sum(df$coskew_numenator) / m
+  df <- df %>% mutate(coskew_denominator_1 = r_tki * r_tki)
+  df$coskew_denominator_1 <- sqrt(sum(df$coskew_denominator_1) / m)
+  df <- df %>% mutate(coskew_denominator_2 = f_tk * f_tk)
+  df$coskew_denominator_2 <- sum(df$coskew_denominator_2) / m
+  df <- df %>% mutate(coskew = coskew_numenator / (coskew_denominator_1 * coskew_denominator_2))
+  
+  df <- df %>% mutate(cokurt_numenator = r_tki * f_tk * f_tk * f_tk)
+  df$cokurt_numenator <- sum(df$cokurt_numenator) / m
+  df <- df %>% mutate(cokurt_denominator_1 = r_tki * r_tki)
+  df$cokurt_denominator_1 <- sqrt(sum(df$cokurt_denominator_1) / m)
+  df <- df %>% mutate(cokurt_denominator_2 = f_tk * f_tk)
+  df$cokurt_denominator_2 <- (sum(df$cokurt_denominator_2) / m)^(3/2)
+  df <- df %>% mutate(cokurt = cokurt_numenator / (cokurt_denominator_1 * cokurt_denominator_2))
+  
+  return(df)
+}
+dsf <- dsf %>% group_by(PERMNO, year_month) %>% do(calculate_r_betas_coskew_cokurt(.)) %>% ungroup()
+
+dsf$f_tk <- NULL
+dsf$f_tk_plus <- NULL
+dsf$f_tk_minus <- NULL
+dsf$beta_denominator <- NULL
+dsf$beta_plus_denominator <- NULL
+dsf$beta_minus_denominator <- NULL
+dsf$r_tki <- NULL
+dsf$r_tki_plus <- NULL
+dsf$r_tki_minus <- NULL
+dsf$beta_N_numenator <- NULL
+dsf$beta_P_numenator <- NULL
+dsf$beta_M_minus_numenator <- NULL
+dsf$beta_M_plus_numenator <- NULL
+dsf$beta_minus_numenator <- NULL
+dsf$beta_plus_numenator <- NULL
+dsf$coskew_numenator <- NULL
+dsf$coskew_denominator_1 <- NULL
+dsf$coskew_denominator_2 <- NULL
+dsf$cokurt_numenator <- NULL
+dsf$cokurt_denominator_1 <- NULL
+dsf$cokurt_denominator_2 <- NULL
+
+summary(dsf)
+```
+
+As we can see, more than overall values seem to be adequate, but there are outliers which make betas more than 10. They were observed in previous assignments too and winsorized. According to coskew, most of companies' returns seem to be skewed similarly to the market. But as for cokurt, tails of companies' return distribution seems to be more fat-tailed, which illustrates that companies are generally more risky.
+
+## 6.2. Value-at-Risk (VaR) and Expected Shortfall (ES)
+
+```{r}
+library(dplyr)
+
+calculate_es <- function(EXCRET) {
+  value_at_risk = quantile(EXCRET, probs=0.05)
+  return(mean(EXCRET[EXCRET <= value_at_risk]))
+}
+
+calculate_var_df <- function(df) {
+  VAR_df <- df %>% group_by(PERMNO) %>% summarize(value_at_risk = quantile(EXCRET, probs=0.05)) %>% ungroup()
+  VAR_df <- VAR_df %>% mutate(value_at_risk_dollar = 1000000 * (1 - value_at_risk))
+  VAR_df$ES <- (df %>% group_by(PERMNO) %>% summarize(ES = calculate_es(EXCRET)) %>% ungroup())$ES
+  return(VAR_df)
+}
+
+print("For individual portfolio")
+VAR_dsf = calculate_var_df(dsf)
+summary(VAR_dsf)
+head(VAR_dsf, 20)
+
+print("For 2001-2011")
+VAR_dsf_2001_2011 = calculate_var_df(dsf_2001_2011)
+summary(VAR_dsf_2001_2011)
+head(VAR_dsf_2001_2011, 10)
+```
+
+As we can see, there are now marked alterations in terms of VaR and related characteristics. We can observe narrowing of the characteristics in terms of minimum and maximum values, but overall the distribtions seem to be quite similar.
+
+## 6.3. Volatility modeling
+
+```{r}
+unique_stocks_2001 <- unique(dsf_2001_2011$PERMNO)
+unique_stocks_2001 <- unique_stocks_2001[unique_stocks_2001 %in% stocks]
+modeling_stock_indices <- sample(1:length(unique_stocks_2001), 5, replace = FALSE)
+modeling_stocks <- unique_stocks_2001[modeling_stock_indices]
+
+sorted_dsf <- dsf[dsf$PERMNO %in% modeling_stocks,]
+sorted_dsf <- sorted_dsf[order(sorted_dsf$date), ]
+sorted_dsf <- sorted_dsf %>% mutate(EXCRET_sqr = EXCRET * EXCRET)
+variance_df <- sorted_dsf %>% group_by(PERMNO) %>% summarize(variance = var(EXCRET), ret_sqr = mean(EXCRET_sqr)) %>% ungroup()
+variance_df <- variance_df %>% mutate(t = 0)
+
+sorted_dsf <- dsf_2001_2011[dsf_2001_2011$PERMNO %in% modeling_stocks,]
+sorted_dsf <- sorted_dsf[order(sorted_dsf$date), ]
+sorted_dsf <- sorted_dsf %>% mutate(EXCRET_sqr = EXCRET * EXCRET)
+variance_df <- variance_df %>% mutate(date = sorted_dsf$date[1])
+summary(variance_df)
+```
+
+```{r}
+lambda = 0.94
+dsf_by_date <- split(sorted_dsf, sorted_dsf$date)
+for (i in 1:length(dsf_by_date)) {
+  for (j in 1:length(dsf_by_date[[i]]$PERMNO)) {
+    if (dsf_by_date[[i]]$PERMNO[j] %in% stocks) {
+      prev_row <- variance_df[(variance_df$PERMNO == as.numeric(dsf_by_date[[i]]$PERMNO[j])) & (variance_df$t == i - 1), ]
+      k <- i - 2
+      while (nrow(prev_row) != 1) {
+        prev_row <- variance_df[(variance_df$PERMNO == as.numeric(dsf_by_date[[i]]$PERMNO[j])) & (variance_df$t == k), ]
+        k <- k - 1
+      }
+      prev_variance <- prev_row$variance
+      prev_ret_sqr <- prev_row$ret_sqr
+      new_variance <- lambda * prev_variance + (1 - lambda) * prev_ret_sqr
+      new_ret_sqr <- as.numeric(dsf_by_date[[i]]$EXCRET_sqr[j])
+      new_row <- data.frame(PERMNO = as.numeric(dsf_by_date[[i]]$PERMNO[j]), 
+                            variance = new_variance, 
+                            ret_sqr = new_ret_sqr, 
+                            t = i,
+                            date = dsf_by_date[[i]]$date[j])
+      variance_df <- rbind(variance_df, new_row)
+    }
+  }
+}
+
+variance_df <- variance_df[order(variance_df$t, variance_df$PERMNO), ]
+summary(variance_df)
+```
+
+
+```{r}
+library(ggplot2)
+to_plot <- variance_df[variance_df$PERMNO == modeling_stocks[[1]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[1]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- variance_df[variance_df$PERMNO == modeling_stocks[[2]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[2]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- variance_df[variance_df$PERMNO == modeling_stocks[[3]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[3]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- variance_df[variance_df$PERMNO == modeling_stocks[[4]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[4]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- variance_df[variance_df$PERMNO == modeling_stocks[[5]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[5]])
+```
+
+Generally, variance seems to be quite volatile. However, clear peaks are observed for all of the companies in 2001 and 2009, which may represent crisis periods. Moreover, the last company just stopped existing in 2001.
+
+## GARCH
+
+```{r}
+sorted_dsf <- dsf[dsf$PERMNO %in% modeling_stocks, c("PERMNO", "date", "EXCRET")]
+colnames(sorted_dsf)[which(colnames(sorted_dsf) == "EXCRET")] <- "returns"
+sorted_dsf <- sorted_dsf[order(sorted_dsf$date), ]
+summary(sorted_dsf)
+
+garch_df <- data.frame(PERMNO = modeling_stocks, omega = 0, beta = 0, alpha = 0)
+head(garch_df)
+```
+
+```{r}
+library("rugarch")
+library("lubridate")
+
+sorted_dsf$date <- as.POSIXct(sorted_dsf$date)
+spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)), distribution.model = "sstd")
+for (stock in modeling_stocks) {
+  model <- ugarchfit(spec, data = sorted_dsf[sorted_dsf$PERMNO == stock, c("date", "returns")])
+  summary(model)
+  coefficients <- model@fit$coef
+  garch_df[garch_df$PERMNO == as.numeric(stock), ]$omega = model@fit$coef[["omega"]]
+  garch_df[garch_df$PERMNO == as.numeric(stock), ]$beta = model@fit$coef[["beta1"]]
+  garch_df[garch_df$PERMNO == as.numeric(stock), ]$alpha = model@fit$coef[["alpha1"]]
+}
+
+head(garch_df)
+```
+
+```{r}
+sorted_dsf <- sorted_dsf %>% mutate(EXCRET_sqr = returns * returns)
+garch_variance_df <- sorted_dsf %>% group_by(PERMNO) %>% summarize(variance = var(returns), ret_sqr = mean(EXCRET_sqr)) %>% ungroup()
+garch_variance_df <- garch_variance_df %>% mutate(t = 0)
+
+sorted_dsf <- dsf_2012_2022[dsf_2012_2022$PERMNO %in% modeling_stocks, c("PERMNO", "date", "EXCRET")]
+sorted_dsf <- sorted_dsf[order(sorted_dsf$date), ]
+sorted_dsf <- sorted_dsf %>% mutate(EXCRET_sqr = EXCRET * EXCRET)
+garch_variance_df <- garch_variance_df %>% mutate(date = sorted_dsf$date[1])
+summary(garch_variance_df)
+```
+
+```{r}
+dsf_by_date <- split(sorted_dsf, sorted_dsf$date)
+for (i in 1:length(dsf_by_date)) {
+  for (j in 1:length(dsf_by_date[[i]]$PERMNO)) {
+    if (dsf_by_date[[i]]$PERMNO[j] %in% stocks) {
+      prev_row <- garch_variance_df[(garch_variance_df$PERMNO == as.numeric(dsf_by_date[[i]]$PERMNO[j])) & 
+                                      (garch_variance_df$t == i - 1), ]
+      k <- i - 2
+      while (nrow(prev_row) != 1) {
+        prev_row <- variance_df[(garch_variance_df$PERMNO == as.numeric(dsf_by_date[[i]]$PERMNO[j])) & 
+                                  (garch_variance_df$t == k), ]
+        k <- k - 1
+      }
+      prev_variance <- prev_row$variance
+      prev_ret_sqr <- prev_row$ret_sqr
+      garch_coeffs <- garch_df[garch_df$PERMNO == dsf_by_date[[i]]$PERMNO[j], ]
+      new_variance <- garch_coeffs$omega + garch_coeffs$beta * prev_variance + garch_coeffs$alpha * prev_ret_sqr
+      new_ret_sqr <- as.numeric(dsf_by_date[[i]]$EXCRET_sqr[j])
+      new_row <- data.frame(PERMNO = as.numeric(dsf_by_date[[i]]$PERMNO[j]), 
+                            variance = new_variance, 
+                            ret_sqr = new_ret_sqr, 
+                            t = i,
+                            date = dsf_by_date[[i]]$date[j])
+      garch_variance_df <- rbind(garch_variance_df, new_row)
+    }
+  }
+}
+
+garch_variance_df <- garch_variance_df[order(garch_variance_df$t, garch_variance_df$PERMNO), ]
+summary(garch_variance_df)
+```
+
+```{r}
+library(ggplot2)
+to_plot <- garch_variance_df[garch_variance_df$PERMNO == modeling_stocks[[1]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[1]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- garch_variance_df[garch_variance_df$PERMNO == modeling_stocks[[2]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[2]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- garch_variance_df[garch_variance_df$PERMNO == modeling_stocks[[3]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[3]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- garch_variance_df[garch_variance_df$PERMNO == modeling_stocks[[4]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[4]])
+```
+
+```{r}
+library(ggplot2)
+to_plot <- garch_variance_df[garch_variance_df$PERMNO == modeling_stocks[[5]], ]
+ggplot(to_plot, aes(x = as.Date(date), y = variance)) +
+  geom_line() +
+  labs(x = "Date", y = "Variance") +
+  ggtitle(modeling_stocks[[5]])
+```
+
+Again, a distinct peak is seen in 2020, during COVID, which should prove the influence of financial crisis on volatility. What is particularly interesting, only 3 out of 5 companies ceased to exist in 2010s.
